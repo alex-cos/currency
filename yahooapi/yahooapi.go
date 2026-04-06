@@ -56,7 +56,6 @@ func NewWithClient(httpClient *http.Client) currency.Currency {
 }
 
 func NewWithClientTimeout(
-	apikey string,
 	httpClient *http.Client,
 	timeout time.Duration,
 ) currency.Currency {
