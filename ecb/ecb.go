@@ -2,19 +2,16 @@ package ecb
 
 import (
 	"bytes"
-	"context"
 	"encoding/xml"
 	"errors"
 	"strings"
 
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/alex-cos/currency"
+	"github.com/alex-cos/restc"
 )
 
 const (
@@ -26,12 +23,11 @@ const (
 
 // ECBAPI represents a ECB API Client connection.
 type ECBAPI struct {
-	client  *http.Client
-	timeout time.Duration
+	client *restc.Client
 }
 
 func New() currency.Currency {
-	return NewWithClientTimeout(http.DefaultClient, 0)
+	return NewWithClientTimeout(http.DefaultClient, restc.DefaultTimeout)
 }
 
 func NewWithTimeout(timeout time.Duration) currency.Currency {
@@ -39,17 +35,20 @@ func NewWithTimeout(timeout time.Duration) currency.Currency {
 }
 
 func NewWithClient(httpClient *http.Client) currency.Currency {
-	return NewWithClientTimeout(httpClient, 0)
+	return NewWithClientTimeout(httpClient, restc.DefaultTimeout)
 }
 
 func NewWithClientTimeout(
 	httpClient *http.Client,
 	timeout time.Duration,
 ) currency.Currency {
-	return &ECBAPI{
-		client:  httpClient,
-		timeout: timeout,
+	client := restc.NewWithClient(APIURL, httpClient)
+	if timeout > 0 {
+		client.SetTimeout(timeout)
 	}
+	client.SetRedirectPolicy(restc.NoRedirect)
+	client.SetRetryCount(1)
+	return &ECBAPI{client: client}
 }
 
 func (api *ECBAPI) Ping() error {
@@ -59,12 +58,14 @@ func (api *ECBAPI) Ping() error {
 func (api *ECBAPI) Latest(base string, symbols []string) (*currency.ResponseAPI, error) {
 	var response ECBResponse
 
-	resp, err := api.query("stats/eurofxref/eurofxref-daily.xml", url.Values{})
+	req := restc.Get("stats/eurofxref/eurofxref-daily.xml").
+		SetHeader("Accept", restc.TypeApplicationXML)
+	resp, err := api.client.Execute(req)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := xml.NewDecoder(bytes.NewReader(resp)).Decode(&response); err != nil {
+	if err := xml.NewDecoder(bytes.NewReader(resp.Bytes())).Decode(&response); err != nil {
 		return nil, err
 	}
 
@@ -95,12 +96,15 @@ func (api *ECBAPI) ForDate(datetime time.Time, base string, symbols []string) (*
 		endpoint = "stats/eurofxref/eurofxref-hist-90d.xml"
 	}
 
-	resp, err := api.query(endpoint, url.Values{})
+	req := restc.Get(endpoint).
+		SetHeader("Accept", restc.TypeApplicationXML)
+
+	resp, err := api.client.Execute(req)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := xml.NewDecoder(bytes.NewReader(resp)).Decode(&response); err != nil {
+	if err := xml.NewDecoder(bytes.NewReader(resp.Bytes())).Decode(&response); err != nil {
 		return nil, err
 	}
 
@@ -135,12 +139,14 @@ func (api *ECBAPI) History(
 ) (*currency.HistoryResponseAPI, error) {
 	var response ECBResponse
 
-	resp, err := api.query("stats/eurofxref/eurofxref-hist.xml", url.Values{})
+	req := restc.Get("stats/eurofxref/eurofxref-hist.xml").
+		SetHeader("Accept", restc.TypeApplicationXML)
+	resp, err := api.client.Execute(req)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := xml.NewDecoder(bytes.NewReader(resp)).Decode(&response); err != nil {
+	if err := xml.NewDecoder(bytes.NewReader(resp.Bytes())).Decode(&response); err != nil {
 		return nil, err
 	}
 
@@ -166,62 +172,6 @@ func (api *ECBAPI) History(
 }
 
 // Unexported functions
-
-func (api *ECBAPI) query(endpoint string, values url.Values) ([]byte, error) {
-	uri := fmt.Sprintf("%s/%s", APIURL, endpoint)
-	resp, err := api.doRequest(http.MethodGet, uri, values)
-
-	return resp, err
-}
-
-func (api *ECBAPI) doRequest(method, reqURL string, values url.Values) ([]byte, error) {
-	ctx, cancel := api.getContext()
-	if cancel != nil {
-		defer cancel()
-	}
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
-	if err != nil {
-		return nil, currency.ErrNewRequest(err)
-	}
-	req.URL.RawQuery = values.Encode()
-
-	resp, err := api.client.Do(req)
-	if err != nil {
-		return nil, currency.ErrDoRequest(err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, currency.ErrReadBody(method, reqURL, err)
-	}
-
-	mimeType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err != nil {
-		return nil, currency.ErrParseContentType(method, reqURL, err)
-	}
-
-	if mimeType != "text/xml" {
-		return nil, currency.ErrUnsupportedMimeType(method, reqURL, mimeType)
-	}
-
-	if len(body) == 0 {
-		return nil, currency.ErrEmptyBody(method, reqURL)
-	}
-
-	return body, nil
-}
-
-func (api *ECBAPI) getContext() (context.Context, context.CancelFunc) {
-	var cancel context.CancelFunc
-
-	ctx := context.Background()
-	if api.timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), api.timeout)
-	}
-
-	return ctx, cancel
-}
 
 func findFirstValidDay(datetime time.Time, days []ECBDay) (bool, []ECBCurrencies) {
 	date := datetime

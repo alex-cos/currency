@@ -1,20 +1,16 @@
 package yahooapi
 
 import (
-	"context"
 	"encoding/csv"
 	"errors"
-
-	"fmt"
 	"io"
-	"mime"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/alex-cos/currency"
+	"github.com/alex-cos/restc"
 )
 
 const (
@@ -31,38 +27,31 @@ const (
 
 // YahooAPI represents a yahoo API Client connection.
 type YahooAPI struct {
-	client  *http.Client
-	timeout time.Duration
+	client *restc.Client
 }
 
 func New() currency.Currency {
-	return NewWithClient(http.DefaultClient)
+	return NewWithClientTimeout(http.DefaultClient, restc.DefaultTimeout)
 }
 
 func NewWithTimeout(timeout time.Duration) currency.Currency {
-	return NewWithClient(&http.Client{
-		Transport:     nil,
-		CheckRedirect: nil,
-		Jar:           nil,
-		Timeout:       timeout,
-	})
+	return NewWithClientTimeout(http.DefaultClient, timeout)
 }
 
 func NewWithClient(httpClient *http.Client) currency.Currency {
-	return &YahooAPI{
-		client:  httpClient,
-		timeout: httpClient.Timeout,
-	}
+	return NewWithClientTimeout(httpClient, restc.DefaultTimeout)
 }
 
 func NewWithClientTimeout(
 	httpClient *http.Client,
 	timeout time.Duration,
 ) currency.Currency {
-	return &YahooAPI{
-		client:  httpClient,
-		timeout: timeout,
+	client := restc.NewWithClient(APIURL+"/"+APIVERSION, httpClient)
+	if timeout > 0 {
+		client.SetTimeout(timeout)
 	}
+	client.SetRedirectPolicy(restc.NoRedirect)
+	return &YahooAPI{client: client}
 }
 
 func (api *YahooAPI) Ping() error {
@@ -72,17 +61,16 @@ func (api *YahooAPI) Ping() error {
 func (api *YahooAPI) Latest(base string, symbols []string) (*currency.ResponseAPI, error) {
 	end := time.Now().UTC().Truncate(DAY)
 	start := end.AddDate(0, 0, -3)
-	params := url.Values{
-		"interval": {"1d"},
-		"period1":  {strconv.FormatInt(start.Unix(), 10)},
-		"period2":  {strconv.FormatInt(end.Unix(), 10)},
-		"events":   {"history"},
-	}
 	date := start.Format(DATEFORMAT)
 	rates := map[string]map[string]float64{}
 	for _, symbol := range symbols {
-		endpoint := fmt.Sprintf("finance/download/%s%s=X", base, symbol)
-		data, err := api.query(endpoint, params)
+		endpoint := "finance/download/" + base + symbol + "=X"
+		data, err := api.query(endpoint, map[string]string{
+			"interval": "1d",
+			"period1":  strconv.FormatInt(start.Unix(), 10),
+			"period2":  strconv.FormatInt(end.Unix(), 10),
+			"events":   "history",
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -94,9 +82,8 @@ func (api *YahooAPI) Latest(base string, symbols []string) (*currency.ResponseAP
 	rate := map[string]float64{}
 	datetime := end
 	for datetime.Unix() >= start.Unix() {
-		_, ok := rates[datetime.Format(DATEFORMAT)]
-		if ok {
-			rate = rates[datetime.Format(DATEFORMAT)]
+		if r, ok := rates[datetime.Format(DATEFORMAT)]; ok {
+			rate = r
 			break
 		}
 		datetime = datetime.AddDate(0, 0, -1)
@@ -110,17 +97,16 @@ func (api *YahooAPI) Latest(base string, symbols []string) (*currency.ResponseAP
 }
 
 func (api *YahooAPI) ForDate(datetime time.Time, base string, symbols []string) (*currency.ResponseAPI, error) {
-	params := url.Values{
-		"interval": {"1d"},
-		"period1":  {strconv.FormatInt(datetime.AddDate(0, 0, -5).Unix(), 10)},
-		"period2":  {strconv.FormatInt(datetime.Unix(), 10)},
-		"events":   {"history"},
-	}
 	date := datetime.Format(DATEFORMAT)
 	rates := map[string]map[string]float64{}
 	for _, symbol := range symbols {
-		endpoint := fmt.Sprintf("finance/download/%s%s=X", base, symbol)
-		data, err := api.query(endpoint, params)
+		endpoint := "finance/download/" + base + symbol + "=X"
+		data, err := api.query(endpoint, map[string]string{
+			"interval": "1d",
+			"period1":  strconv.FormatInt(datetime.AddDate(0, 0, -5).Unix(), 10),
+			"period2":  strconv.FormatInt(datetime.Unix(), 10),
+			"events":   "history",
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -131,12 +117,11 @@ func (api *YahooAPI) ForDate(datetime time.Time, base string, symbols []string) 
 	}
 	day := datetime
 	for day.Unix() > datetime.AddDate(0, 0, -3).Unix() {
-		rates := rates[day.Format(DATEFORMAT)]
-		if len(rates) > 0 {
+		if r := rates[day.Format(DATEFORMAT)]; len(r) > 0 {
 			return &currency.ResponseAPI{
 				Base:  base,
 				Date:  date,
-				Rates: rates,
+				Rates: r,
 			}, nil
 		}
 		day = day.AddDate(0, 0, -1)
@@ -155,20 +140,19 @@ func (api *YahooAPI) History(
 	base string,
 	symbols []string,
 ) (*currency.HistoryResponseAPI, error) {
-	params := url.Values{
-		"interval": {"1d"},
-		"period1":  {strconv.FormatInt(start.Unix(), 10)},
-		"period2":  {strconv.FormatInt(end.Unix(), 10)},
-		"events":   {"history"},
-	}
 	resp := currency.HistoryResponseAPI{
 		Base:  base,
 		Date:  start.Format(DATEFORMAT),
 		Rates: map[string]map[string]float64{},
 	}
 	for _, symbol := range symbols {
-		endpoint := fmt.Sprintf("finance/download/%s%s=X", base, symbol)
-		data, err := api.query(endpoint, params)
+		endpoint := "finance/download/" + base + symbol + "=X"
+		data, err := api.query(endpoint, map[string]string{
+			"interval": "1d",
+			"period1":  strconv.FormatInt(start.Unix(), 10),
+			"period2":  strconv.FormatInt(end.Unix(), 10),
+			"events":   "history",
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -203,8 +187,7 @@ func (api *YahooAPI) parseData(data, symbol string, rates *map[string]map[string
 		if err != nil {
 			continue
 		}
-		_, ok := (*rates)[date.Format(DATEFORMAT)]
-		if !ok {
+		if _, ok := (*rates)[date.Format(DATEFORMAT)]; !ok {
 			(*rates)[date.Format(DATEFORMAT)] = map[string]float64{}
 		}
 		(*rates)[date.Format(DATEFORMAT)][symbol] = value
@@ -212,57 +195,20 @@ func (api *YahooAPI) parseData(data, symbol string, rates *map[string]map[string
 	return nil
 }
 
-func (api *YahooAPI) query(endpoint string, values url.Values) (string, error) {
-	uri := fmt.Sprintf("%s/%s/%s", APIURL, APIVERSION, endpoint)
-	resp, err := api.doRequest(http.MethodGet, uri, values)
-
-	return resp, err
-}
-
-func (api *YahooAPI) doRequest(method, reqURL string, values url.Values) (string, error) {
-	ctx, cancel := api.getContext()
-	if cancel != nil {
-		defer cancel()
+func (api *YahooAPI) query(endpoint string, params map[string]string) (string, error) {
+	req := restc.Get(endpoint)
+	if params != nil {
+		req.SetQueryParams(params)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
+
+	resp, err := api.client.Execute(req)
 	if err != nil {
-		return "", currency.ErrNewRequest(err)
-	}
-	req.URL.RawQuery = values.Encode()
-
-	resp, err := api.client.Do(req)
-	if err != nil {
-		return "", currency.ErrDoRequest(err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", currency.ErrReadBody(method, reqURL, err)
+		return "", err
 	}
 
-	mimeType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err != nil {
-		return "", currency.ErrParseContentType(method, reqURL, err)
-	}
-	if mimeType != "text/csv" {
-		return "", currency.ErrUnsupportedMimeType(method, reqURL, mimeType)
+	if len(resp.Bytes()) == 0 {
+		return "", currency.ErrEmptyBody(restc.MethodGet, endpoint)
 	}
 
-	if len(body) == 0 {
-		return "", currency.ErrEmptyBody(method, reqURL)
-	}
-
-	return string(body), nil
-}
-
-func (api *YahooAPI) getContext() (context.Context, context.CancelFunc) {
-	var cancel context.CancelFunc
-
-	ctx := context.Background()
-	if api.timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), api.timeout)
-	}
-
-	return ctx, cancel
+	return resp.String(), nil
 }
